@@ -1,0 +1,54 @@
+name: doft — TUIC interop against a real node
+
+# Dials a REAL production TUIC endpoint through doft/tuic and pulls a URL through it.
+#
+# WHY SEPARATE FROM THE BUILD. Everything the build proves can be green while the
+# transport is still wrong: the Go compiles, `go vet` passes, the AAR links, the Java
+# surface matches — and the first byte on the wire is rejected because the auth token,
+# the address encoding or the ALPN is off by one field. A protocol implemented from a
+# reading of somebody else's code is not verified until a server that did not write it
+# answers. This runs on Linux, not a phone, so a failure here is unambiguously the
+# PROTOCOL rather than the Android integration.
+#
+# ⚠ IT NEEDS A REGISTERED DEVICE UUID, and deliberately takes it as a dispatch input
+# rather than a repository secret. The uuid is a live credential on the production
+# fleet; a throwaway one is minted in seconds (`POST /v1/session {"device_id": "..."}`)
+# and can be revoked after, while a stored secret outlives everyone's memory of it.
+#
+# The certificate and endpoint come from the PUBLIC /v1/config, so nothing else is
+# needed to run this.
+
+on:
+  workflow_dispatch:
+    inputs:
+      uuid:
+        description: "A REGISTERED device uuid (POST /v1/session mints one)"
+        required: true
+        type: string
+      server:
+        description: "Override the endpoint (default: whatever /v1/config publishes)"
+        required: false
+        type: string
+      port:
+        description: "TUIC port (8446 free, 8447 premium)"
+        required: false
+        default: "8446"
+        type: string
+
+jobs:
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      - name: Dial the node and pull a URL through it
+        run: |
+          set -euo pipefail
+          go run ./doft/interop \
+            -uuid "${{ inputs.uuid }}" \
+            ${{ inputs.server && format('-server {0}', inputs.server) || '' }} \
+            -port "${{ inputs.port }}" \
+            -url http://cp.cloudflare.com/generate_204
