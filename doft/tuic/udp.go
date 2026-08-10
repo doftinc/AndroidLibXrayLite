@@ -112,13 +112,23 @@ func (s *udpSession) Close() error {
 
 // WriteTo relays one UDP payload to host:port, fragmenting if the datagram would not fit.
 func (s *udpSession) WriteTo(payload []byte, host string, port uint16) error {
+	return s.writeTo(payload, host, port, false)
+}
+
+// writeTo does the work; `retried` bounds the learn-and-resend below to a single retry.
+func (s *udpSession) writeTo(payload []byte, host string, port uint16, retried bool) error {
 	conn, err := s.client.offer(context.Background())
 	if err != nil {
 		return err
 	}
-	maxDatagram := 1200
-	if m := conn.ConnectionState().MaxDatagramSize; m > 0 {
-		maxDatagram = int(m)
+	// ⚠ THE LIMIT IS LEARNED, NOT ASKED FOR. quic-go exposes no
+	// `ConnectionState().MaxDatagramSize`; what it does is REFUSE an oversized send with
+	// a `*quic.DatagramTooLargeError` carrying the real ceiling. So start conservative,
+	// and the first refusal teaches the exact value for every packet after it — which is
+	// strictly better than a static guess, because the ceiling moves with the path MTU.
+	maxDatagram := int(s.client.maxDatagram.Load())
+	if maxDatagram <= 0 {
+		maxDatagram = 1200
 	}
 	head := packetHeaderFixed + addrLen(host)
 	room := maxDatagram - head
@@ -156,6 +166,17 @@ func (s *udpSession) WriteTo(payload []byte, host string, port uint16) error {
 		buf = appendAddr(buf, host, port)
 		buf = append(buf, chunk...)
 		if err := conn.SendDatagram(buf); err != nil {
+			var tooLarge *quic.DatagramTooLargeError
+			if errors.As(err, &tooLarge) && tooLarge.MaxDatagramPayloadSize > 0 {
+				// Remember the real ceiling and re-send the WHOLE payload under it. Not
+				// just this chunk: the fragments already sent carry a fragmentTotal the
+				// peer would wait on forever, and the packet id changes on the retry so
+				// the abandoned set ages out of its reassembly buffer on its own.
+				s.client.maxDatagram.Store(tooLarge.MaxDatagramPayloadSize)
+				if !retried {
+					return s.writeTo(payload, host, port, true)
+				}
+			}
 			return err
 		}
 	}

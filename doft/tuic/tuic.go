@@ -34,6 +34,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	quic "github.com/apernet/quic-go"
@@ -83,6 +84,10 @@ type Client struct {
 	udpNext   uint16
 	udpConns  map[uint16]*udpSession
 	packetSeq uint32
+
+	// The largest datagram payload the peer will currently accept, learned from the
+	// first refusal rather than guessed. See udpSession.WriteTo.
+	maxDatagram atomic.Int64
 }
 
 // New validates the config and prepares the TLS/QUIC parameters. It does NOT dial: the
@@ -201,7 +206,11 @@ func (c *Client) authenticate(conn *quic.Conn) error {
 		return fmt.Errorf("tuic: open auth stream: %w", err)
 	}
 	defer stream.Close()
-	token, err := conn.ConnectionState().TLS.ExportKeyingMaterial(
+	// ⚠ ExportKeyingMaterial is a POINTER method, and ConnectionState() returns a value —
+	// so it has to land in an addressable variable first. Calling it inline does not
+	// compile, which is a kinder failure than most of what this handshake can do.
+	tlsState := conn.ConnectionState().TLS
+	token, err := tlsState.ExportKeyingMaterial(
 		string(c.uuid[:]), []byte(c.cfg.Password), 32)
 	if err != nil {
 		return fmt.Errorf("tuic: export keying material: %w", err)
