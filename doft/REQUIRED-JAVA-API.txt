@@ -1,0 +1,45 @@
+# The Java surface the Doft VPN app already binds to, extracted with `javap` from the
+# 54 MB libv2ray.aar that was committed to doftinc/flutter_v2ray_client (ref ffc5f2e)
+# without provenance — no source, no build, no pin.
+#
+# Every line here is asserted to be PRESENT in the AAR this repo builds. That is the whole
+# point of the file: the previous AAR is a binary nobody can rebuild, so the only way to
+# replace it safely is to prove the replacement still answers everything the app calls.
+# Extra symbols are fine (we add some); a MISSING one means the plugin will not compile,
+# or worse, compiles against a different overload.
+#
+# Format: one `class::signature-fragment` per line, matched as a plain substring against
+# the javap -classpath output for that class. Comments and blank lines ignored.
+
+# ── the core controller ───────────────────────────────────────────────────────
+libv2ray.CoreController::public native void startLoop(java.lang.String, int)
+libv2ray.CoreController::public native void stopLoop()
+libv2ray.CoreController::public native long queryStats(java.lang.String, java.lang.String)
+libv2ray.CoreController::public native java.lang.String queryAllOutboundTrafficStats()
+libv2ray.CoreController::public native long measureDelay(java.lang.String)
+libv2ray.CoreController::public native void registerProcessFinder(libv2ray.ProcessFinder)
+libv2ray.CoreController::public native boolean getIsRunning()
+
+# ── package entry points ──────────────────────────────────────────────────────
+libv2ray.Libv2ray::public static native libv2ray.CoreController newCoreController(libv2ray.CoreCallbackHandler)
+libv2ray.Libv2ray::public static native void initCoreEnv(java.lang.String, java.lang.String)
+libv2ray.Libv2ray::public static native java.lang.String checkVersionX()
+libv2ray.Libv2ray::public static native long measureOutboundDelay(java.lang.String, java.lang.String)
+libv2ray.Libv2ray::public static native java.lang.String fetchTlsCertSha256(java.lang.String)
+libv2ray.Libv2ray::public static native java.lang.String fetchQuicCertSha256(java.lang.String)
+libv2ray.Libv2ray::public static native void reconcileBrowserDialer(java.lang.String)
+
+# ── VpnService socket protection (doft_protect.go) ────────────────────────────
+# ⚠ NOT IN UPSTREAM. V2rayCoreManager.java calls both of these by name; a build straight
+# from 2dust/AndroidLibXrayLite does not export them and the plugin fails to compile.
+libv2ray.Libv2ray::public static native void useProtector(libv2ray.V2RayProtector)
+libv2ray.Libv2ray::public static native void setProtectorServer(java.lang.String, boolean)
+libv2ray.V2RayProtector::public abstract boolean protect(long)
+libv2ray.ProtectedDialer::public native boolean protect(long)
+libv2ray.ProtectedDialer::public native boolean isVServerReady()
+
+# ── callbacks the app implements ──────────────────────────────────────────────
+libv2ray.CoreCallbackHandler::public abstract long startup()
+libv2ray.CoreCallbackHandler::public abstract long shutdown()
+libv2ray.CoreCallbackHandler::public abstract long onEmitStatus(long, java.lang.String)
+libv2ray.ProcessFinder::public abstract long findProcessByConnection(java.lang.String, java.lang.String, long, java.lang.String, long)

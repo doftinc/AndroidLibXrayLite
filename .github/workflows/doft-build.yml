@@ -1,0 +1,122 @@
+name: doft — build + verify libv2ray.aar
+
+# Builds the Android xray core the Doft VPN app runs, REPRODUCIBLY.
+#
+# WHY THIS FORK EXISTS AT ALL. The app depends on doftinc/flutter_v2ray_client, which
+# carries `android/libs/libv2ray.aar` as a committed 54 MB binary: no source, no build
+# script, no pin, and an exported Java API (`useProtector`, `setProtectorServer`,
+# `V2RayProtector`, `ProtectedDialer`) that upstream AndroidLibXrayLite does not have. So
+# the single most security-sensitive component in the Android app — the thing that opens
+# every socket and holds every credential — could not be rebuilt, audited, patched or
+# even attributed to a revision. This workflow ends that: `doft_protect.go` restores the
+# missing API from source, and every build is verified against the surface the app calls
+# before it can be published.
+#
+# ⚠ EVERY VERSION IS PINNED, INCLUDING THE NDK. `gomobile@latest` and a floating NDK were
+# what upstream used; both decide binary properties this project has already been burned
+# by — the 16 KB page alignment Google Play requires for Android 15+ is an NDK DEFAULT,
+# and the whole reason this app changed plugins was a 4 KB-aligned .so.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to publish the AAR under (leave empty for a build-only check)"
+        required: false
+        type: string
+  push:
+    branches: [doft]
+  pull_request:
+    branches: [doft]
+
+concurrency:
+  group: doft-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Upstream's own pins at the revision we forked, so a build here differs from a build
+  # there only by our patches.
+  NDK_VERSION: "29.0.14206865"
+  GOMOBILE_VERSION: "v0.0.0-20260709172247-6129f5bee9d5"  # matches golang.org/x/mobile in go.mod
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install the pinned gomobile
+        run: |
+          set -euxo pipefail
+          # ⚠ PINNED, not @latest. gomobile decides the JNI shim, the minimum API level
+          # and the linker flags; "whatever was on the internet that morning" is not a
+          # property you want in the one binary that terminates every user's traffic.
+          go install golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VERSION}
+          go install golang.org/x/mobile/cmd/gobind@${GOMOBILE_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools'
+
+      - name: Install the pinned NDK
+        run: |
+          set -euxo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Vet our own files before a 40-minute bind
+        run: |
+          set -euxo pipefail
+          go vet ./...
+
+      - name: Fetch geoip/geosite assets
+        run: |
+          set -euxo pipefail
+          mkdir -p assets data
+          bash gen_assets.sh download
+          cp -v data/*.dat assets/
+
+      - name: gomobile bind (all four ABIs)
+        run: |
+          set -euxo pipefail
+          gomobile init
+          go mod tidy
+          gomobile bind -v -androidapi 24 -trimpath \
+            -target=android/arm64,android/arm,android/386,android/amd64 \
+            -ldflags='-s -w -buildid= -checklinkname=0' -o libv2ray.aar ./
+          ls -la libv2ray.aar
+
+      - name: Verify — Java surface, 16 KB alignment, all four ABIs
+        run: bash doft/verify-aar.sh libv2ray.aar
+
+      - name: Checksum
+        run: |
+          set -euxo pipefail
+          sha256sum libv2ray.aar | tee libv2ray.aar.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libv2ray-aar
+          path: |
+            libv2ray.aar
+            libv2ray.aar.sha256
+          retention-days: 30
+
+      - name: Publish to a release
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release create "${{ inputs.release_tag }}" --title "${{ inputs.release_tag }}" \
+            --notes "libv2ray.aar built from ${GITHUB_SHA}. Verified: Java surface against doft/REQUIRED-JAVA-API.txt, 16 KB alignment, four ABIs." \
+            || true
+          gh release upload "${{ inputs.release_tag }}" libv2ray.aar libv2ray.aar.sha256 --clobber
