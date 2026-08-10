@@ -26,23 +26,36 @@ echo "verify-aar: $AAR ($(du -h "$AAR" | cut -f1))"
 
 unzip -q -o "$AAR" -d "$WORK/aar"
 
-# ── 3. ABIs ───────────────────────────────────────────────────────────────────
+# ── 3. ABIs, and the JNI library NAME ─────────────────────────────────────────
+# ⚠ THE NAME IS NOT HARD-CODED, IT IS DERIVED FROM THE AAR ITSELF. gomobile decides it,
+# and the first build here proved that assuming `libv2jni.so` gets you a red step for the
+# wrong reason. What actually matters is that the .so present under each ABI is the one
+# `go.Seq` calls System.loadLibrary on — get THAT wrong and the AAR builds, ships, and
+# throws UnsatisfiedLinkError on the user's phone at the first connect.
+unzip -q -o "$WORK/aar/classes.jar" -d "$WORK/classes"
+WANT_LIB="$(javap -c -p -classpath "$WORK/classes" go.Seq 2>/dev/null \
+	| grep -B 2 'loadLibrary' | grep -o 'String [A-Za-z0-9_]*' | awk '{print $2}' | head -1)"
+[ -n "$WANT_LIB" ] || { echo "verify-aar: FAIL — could not read the library name out of go.Seq"; exit 1; }
+echo "  jni      go.Seq loads lib${WANT_LIB}.so"
+
 missing_abi=0
 for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-	if [ -f "$WORK/aar/jni/$abi/libv2jni.so" ]; then
-		printf '  abi %-12s %s\n' "$abi" "$(du -h "$WORK/aar/jni/$abi/libv2jni.so" | cut -f1)"
+	so="$WORK/aar/jni/$abi/lib${WANT_LIB}.so"
+	if [ -f "$so" ]; then
+		printf '  abi %-12s %s\n' "$abi" "$(du -h "$so" | cut -f1)"
 	else
-		echo "  abi $abi MISSING"; missing_abi=1
+		echo "  abi $abi MISSING lib${WANT_LIB}.so — contains: $(ls "$WORK/aar/jni/$abi" 2>/dev/null | tr '\n' ' ')"
+		missing_abi=1
 	fi
 done
-[ "$missing_abi" = 0 ] || { echo "verify-aar: FAIL — not every ABI was built"; exit 1; }
+[ "$missing_abi" = 0 ] || { echo "verify-aar: FAIL — an ABI is missing the library go.Seq loads"; exit 1; }
 
 # ── 2. 16 KB alignment ────────────────────────────────────────────────────────
 # A LOAD segment's align field must be >= 0x4000. readelf prints it in hex ("0x4000")
 # on some versions and as a power expression on others, so parse the hex form and
 # compare numerically rather than grepping for a literal.
 bad_align=0
-for so in "$WORK"/aar/jni/*/libv2jni.so; do
+for so in "$WORK"/aar/jni/*/lib${WANT_LIB}.so; do
 	abi="$(basename "$(dirname "$so")")"
 	worst=""
 	while read -r align; do
@@ -62,7 +75,7 @@ done
 [ "$bad_align" = 0 ] || { echo "verify-aar: FAIL — a .so is not 16 KB aligned"; exit 1; }
 
 # ── 1. the Java surface ───────────────────────────────────────────────────────
-unzip -q -o "$WORK/aar/classes.jar" -d "$WORK/classes"
+# (classes.jar was already extracted above, to read the library name)
 missing_api=0
 while IFS= read -r line; do
 	case "$line" in ''|\#*) continue ;; esac
