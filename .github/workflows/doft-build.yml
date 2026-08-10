@@ -43,6 +43,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # `gh release upload` needs write access to Contents. The default token is read-only
+    # here, and the failure surfaces only in the very last step — after a 15-minute bind.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
