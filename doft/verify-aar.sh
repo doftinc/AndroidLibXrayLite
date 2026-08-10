@@ -50,13 +50,23 @@ for abi in arm64-v8a armeabi-v7a x86 x86_64; do
 done
 [ "$missing_abi" = 0 ] || { echo "verify-aar: FAIL — an ABI is missing the library go.Seq loads"; exit 1; }
 
-# ── 2. 16 KB alignment ────────────────────────────────────────────────────────
-# A LOAD segment's align field must be >= 0x4000. readelf prints it in hex ("0x4000")
-# on some versions and as a power expression on others, so parse the hex form and
-# compare numerically rather than grepping for a literal.
+# ── 2. 16 KB alignment — 64-BIT ABIs ONLY ─────────────────────────────────────
+# ⚠ THE FIRST VERSION OF THIS CHECK FAILED A CORRECT BUILD. It demanded 16 KB on all
+# four ABIs; armeabi-v7a and x86 came back at 4096 and the step went red. They are
+# supposed to: 16 KB page size is a 64-BIT Android feature, and Google's requirement is
+# about 64-bit devices. The two 32-bit ABIs are 4 KB-aligned and always will be.
+#
+# Verified against the AAR currently IN PRODUCTION rather than argued from the docs —
+# `objdump -p` on the committed libv2ray.aar gives 2**14 for arm64-v8a and x86_64 and
+# 2**12 for armeabi-v7a and x86, i.e. exactly the shape this build produces. A gate that
+# fails what is already shipping and passing Play review is testing the wrong property.
 bad_align=0
 for so in "$WORK"/aar/jni/*/lib${WANT_LIB}.so; do
 	abi="$(basename "$(dirname "$so")")"
+	case "$abi" in
+		arm64-v8a|x86_64) ;;
+		*) printf '  align %-12s 32-bit ABI — 16 KB does not apply\n' "$abi"; continue ;;
+	esac
 	worst=""
 	while read -r align; do
 		[ -n "$align" ] || continue
