@@ -18,7 +18,7 @@ libv2ray.CoreController::public native long queryStats(java.lang.String, java.la
 libv2ray.CoreController::public native java.lang.String queryAllOutboundTrafficStats()
 libv2ray.CoreController::public native long measureDelay(java.lang.String)
 libv2ray.CoreController::public native void registerProcessFinder(libv2ray.ProcessFinder)
-libv2ray.CoreController::public native boolean getIsRunning()
+libv2ray.CoreController::public final native boolean getIsRunning()
 
 # ── package entry points ──────────────────────────────────────────────────────
 libv2ray.Libv2ray::public static native libv2ray.CoreController newCoreController(libv2ray.CoreCallbackHandler)
@@ -43,3 +43,10 @@ libv2ray.CoreCallbackHandler::public abstract long startup()
 libv2ray.CoreCallbackHandler::public abstract long shutdown()
 libv2ray.CoreCallbackHandler::public abstract long onEmitStatus(long, java.lang.String)
 libv2ray.ProcessFinder::public abstract long findProcessByConnection(java.lang.String, java.lang.String, long, java.lang.String, long)
+
+# ── TUIC v5 (doft_tuic.go) ────────────────────────────────────────────────────
+# ⚠ NOT IN UPSTREAM either. gomobile maps Go `int` to Java `long`, so StartTuic(string)
+# int arrives as `long startTuic(String)` — the Java side must not declare it as `int`.
+libv2ray.Libv2ray::public static native long startTuic(java.lang.String)
+libv2ray.Libv2ray::public static native void stopTuic()
+libv2ray.Libv2ray::public static native long tuicPort()
