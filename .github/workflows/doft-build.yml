@@ -68,9 +68,18 @@ jobs:
       - name: Install the pinned NDK
         run: |
           set -euxo pipefail
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" >/dev/null
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          # ⚠ A HERE-STRING, NOT `yes | sdkmanager`. sdkmanager exits as soon as it has its
+          # answers, SIGPIPE kills `yes`, and under `pipefail` the step dies with a
+          # broken-pipe error that says nothing about the NDK — which is exactly how the
+          # first run of this workflow failed. And the install is asserted on the ARTIFACT
+          # rather than on an exit code, because sdkmanager returns 0 for plenty of
+          # outcomes that leave no toolchain behind.
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" >/dev/null <<< "y" || true
+          NDK="$ANDROID_HOME/ndk/${NDK_VERSION}"
+          [ -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ] || {
+            echo "::error::NDK ${NDK_VERSION} did not install at $NDK"; ls -la "$ANDROID_HOME/ndk" || true; exit 1; }
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
 
       - name: Vet our own files before a 40-minute bind
         run: |
