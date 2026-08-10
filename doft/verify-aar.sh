@@ -21,6 +21,27 @@ REQ="${2:-$(dirname "$0")/REQUIRED-JAVA-API.txt}"
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null || true; find "$WORK" -depth -delete 2>/dev/null || true' EXIT
 
+# Smallest LOAD-segment alignment in an ELF, in bytes, or empty when no tool can read it.
+_min_align() {
+	_f="$1"; _min=""
+	if command -v readelf >/dev/null 2>&1; then
+		for _a in $(readelf -lW "$_f" 2>/dev/null | awk '$1=="LOAD"{print $NF}'); do
+			case "$_a" in 0x*|[0-9]*) _d=$((_a)) ;; *) continue ;; esac
+			[ -z "$_min" ] || [ "$_d" -ge "$_min" ] || _min="$_d"
+			[ -n "$_min" ] || _min="$_d"
+		done
+	elif command -v objdump >/dev/null 2>&1; then
+		for _e in $(objdump -p "$_f" 2>/dev/null | awk '/LOAD/{for(i=1;i<=NF;i++) if($i=="align") print $(i+1)}'); do
+			# objdump writes `2**14`; take the exponent after the last asterisk.
+			_x="${_e##*\*}"
+			case "$_x" in [0-9]*) _d=$((1 << _x)) ;; *) continue ;; esac
+			[ -z "$_min" ] || [ "$_d" -ge "$_min" ] || _min="$_d"
+			[ -n "$_min" ] || _min="$_d"
+		done
+	fi
+	printf '%s' "$_min"
+}
+
 [ -f "$AAR" ] || { echo "verify-aar: no such file: $AAR"; exit 1; }
 echo "verify-aar: $AAR ($(du -h "$AAR" | cut -f1))"
 
@@ -61,28 +82,37 @@ done
 # 2**12 for armeabi-v7a and x86, i.e. exactly the shape this build produces. A gate that
 # fails what is already shipping and passing Play review is testing the wrong property.
 bad_align=0
+checked_align=0
 for so in "$WORK"/aar/jni/*/lib${WANT_LIB}.so; do
 	abi="$(basename "$(dirname "$so")")"
 	case "$abi" in
 		arm64-v8a|x86_64) ;;
 		*) printf '  align %-12s 32-bit ABI — 16 KB does not apply\n' "$abi"; continue ;;
 	esac
-	worst=""
-	while read -r align; do
-		[ -n "$align" ] || continue
-		dec=$((align))
-		if [ -z "$worst" ] || [ "$dec" -lt "$worst" ]; then worst="$dec"; fi
-	done < <(readelf -lW "$so" | awk '$1=="LOAD"{print $NF}')
-	if [ -z "$worst" ]; then
-		echo "  align $abi: NO LOAD SEGMENTS PARSED — refusing to guess"; bad_align=1; continue
+	# readelf on Linux (the CI runner) prints `0x4000`; objdump on macOS (a laptop
+	# checking a published artefact) prints `2**14`. Both are normalised to bytes by a
+	# helper rather than parsed inline, because the inline version silently produced NO
+	# alignment lines at all and the script still printed OK — a gate that passes without
+	# checking is worse than no gate.
+	worst="$(_min_align "$so")" || worst=""
+	if ! printf '%s' "$worst" | grep -qE '^[0-9]+$'; then
+		echo "  align $abi: COULD NOT BE READ (need readelf or objdump) — refusing to guess"
+		bad_align=1; continue
 	fi
+	checked_align=$((checked_align + 1))
 	if [ "$worst" -lt 16384 ]; then
 		echo "  align $abi: $worst (< 16384) — Google Play rejects this"; bad_align=1
 	else
 		printf '  align %-12s %s bytes OK\n' "$abi" "$worst"
 	fi
 done
-[ "$bad_align" = 0 ] || { echo "verify-aar: FAIL — a .so is not 16 KB aligned"; exit 1; }
+# ⚠ AND THE COUNT IS CHECKED. Both 64-bit ABIs must actually have been measured; without
+# this, a parsing change that yields zero measurements reads as success.
+if [ "$checked_align" -lt 2 ]; then
+	echo "  align: only $checked_align of 2 64-bit ABIs were measured"
+	bad_align=1
+fi
+[ "$bad_align" = 0 ] || { echo "verify-aar: FAIL — alignment unverified or below 16 KB (see above)"; exit 1; }
 
 # ── 1. the Java surface ───────────────────────────────────────────────────────
 # (classes.jar was already extracted above, to read the library name)
