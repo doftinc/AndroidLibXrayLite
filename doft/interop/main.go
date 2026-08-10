@@ -20,6 +20,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -81,6 +82,30 @@ func main() {
 	if err != nil {
 		fail("client: %v", err)
 	}
+	// ── stage 0: dial the TUIC layer DIRECTLY, before any SOCKS5 is involved ──
+	// ⚠ WITHOUT THIS THE FAILURE HAS NO NAME. Going straight to the SOCKS5 path turns
+	// every possible fault — QUIC handshake, certificate pin, auth token, address
+	// encoding — into one `EOF` from the HTTP client, because OpenStream succeeds
+	// locally and the CONNECT header does not travel until the first write. Dialling the
+	// client directly puts each stage on its own line.
+	direct, err := client.DialTCP(context.Background(), "cp.cloudflare.com", 80)
+	if err != nil {
+		fail("QUIC/auth: %v", err)
+	}
+	fmt.Println("interop: QUIC connected, certificate pin matched, auth written")
+	_ = direct.SetDeadline(time.Now().Add(20 * time.Second))
+	if _, err := direct.Write([]byte("GET /generate_204 HTTP/1.1\r\nHost: cp.cloudflare.com\r\nConnection: close\r\n\r\n")); err != nil {
+		fail("relay write: %v", err)
+	}
+	head := make([]byte, 64)
+	n0, err := direct.Read(head)
+	if err != nil && n0 == 0 {
+		fail("relay read (the server accepted the stream and then said nothing — "+
+			"auth rejected, or the CONNECT header is malformed): %v", err)
+	}
+	fmt.Printf("interop: direct relay OK — %q\n", strings.TrimSpace(string(head[:n0])))
+	direct.Close()
+
 	srv, err := tuic.Listen(client, 0)
 	if err != nil {
 		fail("listen: %v", err)
