@@ -102,7 +102,18 @@ jobs:
           set -euxo pipefail
           gomobile init
           go mod tidy
-          gomobile bind -v -androidapi 24 -trimpath \
+          # ⚠ 21, NOT 24, AND THE APP IS WHY. gomobile stamps this into the AAR's own
+          # AndroidManifest.xml as minSdkVersion, and Android's manifest merger refuses
+          # a library floor above the app's — the Doft app floor is 23, so an AAR built
+          # at 24 fails `flutter build appbundle` outright with "minSdkVersion 23 cannot
+          # be smaller than version 24 declared in library [:libv2ray:]". The production
+          # AAR this fork replaces declares 21. 24 was inherited from upstream's own
+          # workflow, where nothing consumes the artifact at a lower floor.
+          #
+          # Forcing it instead (tools:overrideLibrary) is the wrong trade: it silences
+          # the merger and leaves API 23 devices running a core built against APIs that
+          # may not exist there — a crash on a user's phone rather than a red build.
+          gomobile bind -v -androidapi 21 -trimpath \
             -target=android/arm64,android/arm,android/386,android/amd64 \
             -ldflags='-s -w -buildid= -checklinkname=0' -o libv2ray.aar ./
           ls -la libv2ray.aar

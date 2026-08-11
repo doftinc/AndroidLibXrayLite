@@ -134,4 +134,41 @@ if [ "$missing_api" != 0 ]; then
 fi
 echo "  api      every required symbol present ($(grep -cv '^\s*\(#\|$\)' "$REQ") checked)"
 
+# ── 4. the manifest floor ─────────────────────────────────────────────────────
+#
+# ⚠ THE ONE PROPERTY THIS SCRIPT DID NOT CHECK IS THE ONE THAT BROKE THE APP BUILD.
+# gomobile stamps `-androidapi` into the AAR's own AndroidManifest.xml, and the app's
+# manifest merger refuses outright when a library declares a floor above the app's:
+#
+#   uses-sdk:minSdkVersion 23 cannot be smaller than version 24 declared in
+#   library [:libv2ray:] ... as the library might be using APIs not available in 23
+#
+# Everything else here passed on that AAR — four ABIs, 16 KB alignment, 26/26 symbols —
+# so "verify-aar: OK" was printed on an artifact that could not be built into an app at
+# all. The production AAR the fork replaces declares 21; the app floor is 23. Checked
+# against the APP's floor rather than a constant, so raising the app one day does not
+# silently make this gate meaningless.
+APP_MIN_SDK="${APP_MIN_SDK:-23}"
+man="$WORK/AndroidManifest.xml"
+if [ ! -f "$man" ]; then
+	unzip -o -q "$AAR" AndroidManifest.xml -d "$WORK" 2>/dev/null || true
+fi
+if [ -f "$man" ]; then
+	# The AAR manifest is plain XML (only an APK's is binary), so strings/sed is enough.
+	aar_min="$(sed -n 's/.*minSdkVersion="\([0-9]\{1,\}\)".*/\1/p' "$man" | head -1)"
+	if [ -z "$aar_min" ]; then
+		echo "verify-aar: FAIL — no minSdkVersion in the AAR manifest to check"; exit 1
+	fi
+	if [ "$aar_min" -gt "$APP_MIN_SDK" ]; then
+		echo "  minsdk   AAR declares $aar_min, the app floor is $APP_MIN_SDK"
+		echo "verify-aar: FAIL — the manifest merger will refuse this AAR."
+		echo "            Build with -androidapi $APP_MIN_SDK or lower, or raise the app's minSdk"
+		echo "            deliberately (that drops real devices; it is not a build detail)."
+		exit 1
+	fi
+	echo "  minsdk   $aar_min <= app floor $APP_MIN_SDK OK"
+else
+	echo "verify-aar: FAIL — could not read the AAR manifest"; exit 1
+fi
+
 echo "verify-aar: OK"
