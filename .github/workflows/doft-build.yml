@@ -41,7 +41,11 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Private x86_64 runner. ⚠ IT MUST STAY x86_64: the NDK ships exactly one
+    # Linux archive (android-ndk-r29-linux.zip) and its compilers live under
+    # toolchains/llvm/prebuilt/linux-x86_64 — there is no linux-aarch64 host
+    # toolchain, so the larger ARM CI pool cannot build this at all.
+    runs-on: [self-hosted, linux, x64, doft-android]
     timeout-minutes: 45
     # `gh release upload` needs write access to Contents. The default token is read-only
     # here, and the failure surfaces only in the very last step — after a 15-minute bind.
@@ -64,10 +68,27 @@ jobs:
           go install golang.org/x/mobile/cmd/gobind@${GOMOBILE_VERSION}
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - uses: android-actions/setup-android@v3
-        with:
-          log-accepted-android-sdk-licenses: false
-          packages: 'platform-tools'
+      # This host already carries a ghrunner-owned Android SDK at
+      # /opt/flutter-android/android-sdk (the same one the Doft app's APK builds
+      # use). android-actions/setup-android would install a SECOND copy into the
+      # runner tool cache and re-accept every licence on each run; pointing at the
+      # existing one keeps a single SDK and lets the pinned NDK below persist
+      # between runs instead of being re-downloaded each time. The clone-if-absent
+      # shape used by vpn-app's ci.yml is not needed here: sdkmanager is the only
+      # thing this job wants from the SDK, and the step below fails loudly if the
+      # NDK it installs is not where it should be.
+      - name: Use the host Android SDK
+        run: |
+          set -euo pipefail
+          SDK=/opt/flutter-android/android-sdk
+          [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ] || {
+            echo "::error::sdkmanager missing at $SDK — this runner is not provisioned for Android"; exit 1; }
+          {
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_SDK_ROOT=$SDK"
+          } >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
       - name: Install the pinned NDK
         run: |
