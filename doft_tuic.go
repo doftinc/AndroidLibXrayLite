@@ -73,6 +73,12 @@ func StartTuic(requestJSON string) int {
 		SNI:        req.SNI,
 		CertPEM:    req.Cert,
 		UDPTimeout: time.Duration(req.UDPTimeoutSec) * time.Second,
+		// ⚠ THIS IS THE LINE THAT KEEPS THE TRANSPORT OUT OF ITS OWN TUNNEL.
+		// doft_protect.go protects every socket the CORE opens, through xray's dialer
+		// controller — a seam this client never touches, because quic-go opens its own
+		// UDP socket. Hand it the same protector explicitly, or on a device with
+		// VpnService up the QUIC packets are routed into the tunnel they are carrying.
+		Control: protectSocket,
 	})
 	if err != nil {
 		log.Printf("doft-tuic: %v", err)

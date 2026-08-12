@@ -22,6 +22,7 @@ package libv2ray
 // tunnel. An inbound listener is unaffected — controllers registered here run on dials.
 
 import (
+	"errors"
 	"log"
 	"sync"
 	"syscall"
@@ -93,6 +94,30 @@ func UseProtector(p V2RayProtector) {
 			log.Printf("doft-protect: FAILED to register the dialer controller: %v", controllerErr)
 		}
 	})
+}
+
+// protectSocket applies the installed protector to one raw file descriptor, for the
+// sockets this build opens OUTSIDE xray's dialer — today that is the TUIC client's QUIC
+// socket, which quic-go creates itself.
+//
+// ⚠ IT REFUSES WHEN THERE IS NO PROTECTOR, and that is the opposite of the controller
+// above. The controller runs for every core dial, including ones that legitimately happen
+// before `VpnService.establish()`, so a refusal there is logged and tolerated. This runs
+// only from StartTuic, which the plugin calls with the service already up: no protector,
+// or a protector that says no, means the very next packet would go into the tunnel. An
+// error here fails one dial and the balancer moves on; silence here is a tunnel that
+// looks connected and carries nothing.
+func protectSocket(fd uintptr) error {
+	protectorMu.RLock()
+	current := protector
+	protectorMu.RUnlock()
+	if current == nil {
+		return errors.New("doft-protect: no protector installed — refusing an unprotected socket")
+	}
+	if !current.Protect(int64(fd)) {
+		return errors.New("doft-protect: VpnService.protect() refused the socket")
+	}
+	return nil
 }
 
 // SetProtectorServer records the proxy endpoint the tunnel is about to dial.

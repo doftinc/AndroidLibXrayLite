@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	quic "github.com/apernet/quic-go"
@@ -66,6 +67,22 @@ type Config struct {
 	CertPEM  string // PINNED server certificate; empty is REFUSED, never "insecure"
 	// UDPTimeout bounds how long an idle UDP association is kept. 0 → 5 minutes.
 	UDPTimeout time.Duration
+
+	// Control runs on the raw UDP socket BEFORE it sends anything — on Android this is
+	// `VpnService.protect(fd)`.
+	//
+	// ⚠ WITHOUT IT THIS TRANSPORT EATS ITSELF, and nothing else in the build can supply
+	// it. doft_protect.go protects every socket the CORE opens by registering a dialer
+	// controller with `internet.RegisterDialerController` — but that seam belongs to
+	// xray's dialer, and this client does not use it: quic-go opens its own UDP socket.
+	// So once VpnService is up, the packets carrying the tunnel would be routed INTO the
+	// tunnel, and the shape on the device is the expensive one this stack keeps
+	// producing — "connected, no internet", with a healthy-looking handshake in the log.
+	//
+	// It cannot be caught off-device either: the CI interop test dials the production
+	// node from a Linux box with no VpnService, where an unprotected socket is simply a
+	// normal socket and every assertion passes. Nil is correct there and only there.
+	Control func(fd uintptr) error
 }
 
 // Client owns one QUIC connection to the server and multiplexes every stream over it.
@@ -77,6 +94,7 @@ type Client struct {
 
 	mu     sync.Mutex
 	conn   *quic.Conn
+	pconn  net.PacketConn
 	closed bool
 
 	// UDP associations, keyed by the session id we allocate.
@@ -180,18 +198,80 @@ func (c *Client) offer(ctx context.Context) (*quic.Conn, error) {
 		}
 	}
 	addr := net.JoinHostPort(c.cfg.Server, strconv.Itoa(c.cfg.Port))
-	conn, err := quic.DialAddr(ctx, addr, c.tlsConfig, c.quicConf)
+	// ⚠ WE OPEN THE SOCKET, NOT quic-go. `quic.DialAddr` calls net.ListenUDP itself and
+	// offers no seam to touch the fd first, so it cannot be protected — see Config.Control.
+	pc, raddr, err := c.listenUDP(ctx)
 	if err != nil {
+		return nil, err
+	}
+	conn, err := quic.Dial(ctx, pc, raddr, c.tlsConfig, c.quicConf)
+	if err != nil {
+		_ = pc.Close()
 		return nil, fmt.Errorf("tuic: dial %s: %w", addr, err)
 	}
 	if err := c.authenticate(conn); err != nil {
 		_ = conn.CloseWithError(0, "")
+		_ = pc.Close()
 		return nil, err
 	}
 	c.conn = conn
+	// ⚠ WE OWN IT, SO WE CLOSE IT. quic-go closes a PacketConn it created and leaves one
+	// it was handed; without this every re-dial after a network change leaks a UDP socket
+	// for the life of the process, on the transport most likely to re-dial.
+	old := c.pconn
+	c.pconn = pc
+	if old != nil {
+		_ = old.Close()
+	}
 	go c.readDatagrams(conn)
 	go c.heartbeat(conn)
 	return conn, nil
+}
+
+// listenUDP opens the local UDP socket the QUIC connection will run on and applies
+// Config.Control to it before a single packet leaves.
+func (c *Client) listenUDP(ctx context.Context) (net.PacketConn, *net.UDPAddr, error) {
+	lc := net.ListenConfig{}
+	if c.cfg.Control != nil {
+		lc.Control = func(_, _ string, rc syscall.RawConn) error {
+			var inner error
+			// ⚠ BOTH ERRORS MATTER AND THEY MEAN DIFFERENT THINGS. A failure from
+			// rc.Control means we never saw the fd; a failure from the callback means
+			// protect() itself refused. Either way the socket would carry the tunnel's
+			// own packets into the tunnel, so unlike the core's controller — which
+			// tolerates a refusal because it also runs before establish() — this one
+			// fails the dial. A TUIC dial that fails is retried by the balancer; a TUIC
+			// dial that loops is a dead tunnel that reports itself healthy.
+			if err := rc.Control(func(fd uintptr) { inner = c.cfg.Control(fd) }); err != nil {
+				return err
+			}
+			return inner
+		}
+	}
+	// Bind the wildcard address of the right family — the kernel picks the source
+	// address and port when the first packet is sent.
+	network := "udp4"
+	if ip := net.ParseIP(c.cfg.Server); ip != nil && ip.To4() == nil {
+		network = "udp6"
+	}
+	pc, err := lc.ListenPacket(ctx, network, ":0")
+	if err != nil {
+		return nil, nil, fmt.Errorf("tuic: listen %s: %w", network, err)
+	}
+	// ⚠ RESOLUTION IS NOT PROTECTED, SO PREFER NOT TO NEED IT. Every endpoint this fleet
+	// publishes for tuic is a literal IP, which takes the first branch and performs no
+	// lookup at all. A hostname would be resolved by the system resolver over a socket
+	// this code does not own — on Android, inside the tunnel — so it is allowed but
+	// deliberately narrow: if it ever starts happening, this is the line to find.
+	if ip := net.ParseIP(c.cfg.Server); ip != nil {
+		return pc, &net.UDPAddr{IP: ip, Port: c.cfg.Port}, nil
+	}
+	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(c.cfg.Server, strconv.Itoa(c.cfg.Port)))
+	if err != nil {
+		_ = pc.Close()
+		return nil, nil, fmt.Errorf("tuic: resolve %s: %w", c.cfg.Server, err)
+	}
+	return pc, raddr, nil
 }
 
 // authenticate performs the TUIC v5 handshake on a fresh unidirectional stream.
@@ -300,7 +380,8 @@ func (c *Client) Close() error {
 	c.mu.Lock()
 	c.closed = true
 	conn := c.conn
-	c.conn = nil
+	pc := c.pconn
+	c.conn, c.pconn = nil, nil
 	c.mu.Unlock()
 	c.udpMu.Lock()
 	for _, s := range c.udpConns {
@@ -308,10 +389,17 @@ func (c *Client) Close() error {
 	}
 	c.udpConns = make(map[uint16]*udpSession)
 	c.udpMu.Unlock()
+	var err error
 	if conn != nil {
-		return conn.CloseWithError(0, "")
+		err = conn.CloseWithError(0, "")
 	}
-	return nil
+	// After the QUIC teardown, not before: closing the socket first turns the CONNECTION_CLOSE
+	// frame into a write on a closed fd, so the server learns of the departure only by idle
+	// timeout and holds the association open for 30 more seconds.
+	if pc != nil {
+		_ = pc.Close()
+	}
+	return err
 }
 
 // ── address codec ────────────────────────────────────────────────────────────
